@@ -1,0 +1,221 @@
+import socket
+import os
+import threading
+# So phep gan so phep so sanh, so phep gan khong co dinh do co nhieu condition
+# Xoa 1 node bat ky, tim kiem node, them node dau cuoi mang link list
+# Doc ghi file text
+PORT = 80
+
+# Hàm lấy Địa chỉ Host và phần Path từ 1 link URL
+def getHOSTandPATHfromURL(URL):
+    # http://web.stanford.edu/class/cs224w/slides/01-intro.pdf
+    # www.example.com/index.html
+    # example.com/index.html
+    position_start = URL.find("//") + 2
+    if position_start == 1:
+        position_start = 0
+    position_end = URL.find("/", position_start)
+    if position_end == -1:
+        host = URL[position_start:]
+        position_end = len(URL) - 1
+    else:
+        host = URL[position_start : position_end]
+    path = URL[position_end+1:]
+
+    print("host: ", host)
+    print("path: ", path)
+    return (host, path)
+# Hàm connect to server
+def connectToServer(host,port):        
+    print("Client connect to server with port: " + str(PORT))
+    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    s.connect((host,port))
+    return s
+# Hàm gửi 1 request đến server để lấy dữ liệu
+def sendRequest(client_socket, PATH, HOST):
+    # Từ khóa GET để lấy toàn bộ dữ liệu từ server
+    request = "GET /" + PATH + " HTTP/1.1\r\nHost: " + HOST + "\r\nConnection: keep-alive\r\n\r\n"
+    
+    client_socket.sendall(request.encode())
+    return client_socket
+# Hàm lấy lấy header sau khi send request
+def getHeader(client_socket):
+    header = b""
+    character_splip = b"\r\n\r\n"
+    while character_splip not in header:
+        header = header + client_socket.recv(1) #Lấy byte ở đây
+    return header
+# Hàm trả về độ dài của dữ liệu trong phần body
+def getContentLength(header):
+    a = "Content-Length: "
+    length1 = header.find(a.encode())
+    if(length1 < 0): return -1
+    length2 = header[length1:].find(b"\r\n")
+    n = header[length1+len(a):length1 + length2]
+
+    return int(n)
+# Hàm lấy dữ liệu dựa vào content length
+def getDataByContentLength(client_socket, header):
+    content_length = getContentLength(header)
+
+    data_receive = b""
+    data_receive += receive_socket_data(client_socket,content_length)
+    return data_receive
+# Hàm này dùng để nhận dữ liệu thay thế hàm recv(size) vì khi gửi có thể không gửi hết dữ liệu
+# Hàm này đảm bảo nhận hết dữ liệu
+def receive_socket_data(sock,length):
+    result=b''
+    remain_bytes=length
+    while (remain_bytes!=0) :
+        data=sock.recv(remain_bytes)
+        remain_bytes-=len(data)
+        result+=data
+    return result
+# Hàm kiểm tra xem có phải truyền dữ liệu theo Chunked không
+def isChunkedTransfer(header):
+    stringfind = b"Transfer-Encoding: chunked"
+    position_stringfind = header.find(stringfind)
+    if position_stringfind == -1:
+        return False
+    else:
+        return True
+# Hàm lấy data dựa vào Chunked
+def getDataByChunked(client_socket, header):
+    data_result =b""
+    delimiter = b"\r\n"
+    while 1:
+        data_buffer_length = b""
+        data_length = b""
+        while delimiter not in data_buffer_length:
+            buffer = receive_socket_data(client_socket, 1)
+            data_buffer_length += buffer
+        data_length = data_buffer_length[:len(data_buffer_length)-2]
+        if int(data_length, base = 16) != 0:
+            #Nhan data tu data_length
+            buffer_data = receive_socket_data(client_socket, int(data_length, base = 16) + 2)
+            data_result += buffer_data[:len(buffer_data) - 2]
+        else: break
+    return data_result
+# Hàm lấy phần path để đặt tên lưu file
+def get_tail_save_file(path):
+    character_recognize_file = "."
+    tail_format = ""
+    if character_recognize_file not in path:
+        if path == "" or path == "/":
+            tail_format = "_index.html"
+        else:
+            pass
+    else:
+        position_start = path.find("/")
+        index = position_start
+        while position_start != -1:
+            index = position_start
+            position_start = path.find("/", index + 1)
+        tail_format = "_" + path[index + 1:]
+
+    return tail_format
+# Hàm tạo nên file name hoàn chỉnh
+def getFileName(host, path):
+    file_name = host + get_tail_save_file(path) 
+    return file_name
+# Hàm download 1 file từ 1 URL
+def download_file(URL_file_download, client_download, path, host, filename):
+    # host, path = getHOSTandPATHfromURL(URL_file_download)
+    # filename = getFileName(host, path)
+
+    client_download = sendRequest(client_download, path, host)
+    header = getHeader(client_download)
+    
+    if isChunkedTransfer(header):
+        data = getDataByChunked(client_download, header)
+    else:
+        data = getDataByContentLength(client_download, header)
+    with open(filename, "wb") as fileResult:
+        fileResult.write(data)
+    fileResult.close()
+    print("Code have run!")
+# Hàm này để xử lý dữ liệu khi server có nhiều file cần download
+def handleData(URL, data):
+    url_list = list()
+    delimiter_start = b"<a href=\"" #8 byte here
+    delimiter_end = b"\""
+    delimiter_signal = b"."
+
+    index_start = data.find(delimiter_start)
+    while index_start != -1:
+        index_end = data.find(delimiter_end, index_start + 9)
+        string_buffer = data[index_start+9:index_end]
+        if string_buffer.find(delimiter_signal) != -1:
+            string_buffer = URL.encode() + string_buffer
+            url_list.append(string_buffer)
+        index_start = data.find(delimiter_start, index_end)
+        index_end = data.find(delimiter_end, index_start + 9)
+
+    return url_list
+# Hàm kiểm tra xem Path này có phải là folder hay không
+def isFolder(path):
+    if path == "":
+        return False
+    if path[len(path) - 1] == '/':
+        return True
+    else:
+        return False
+# Hàm tải tất cả file từ 1 URL là folder
+def download_file_in_folder(URL_folder, client_socket_folder):
+    # http://web.stanford.edu/class/cs224w/slides/
+    # host: web.stanford.edu
+    # path: class/cs224w/slides/
+    host, path = getHOSTandPATHfromURL(URL_folder)
+    client_socket_folder = sendRequest(client_socket_folder, path, host)
+    header = getHeader(client_socket_folder)
+    if isChunkedTransfer(header):
+        data = getDataByChunked(client_socket_folder, header)
+    else:
+        data = getDataByContentLength(client_socket_folder, header)
+        
+    url_list = handleData(URL_folder, data)
+    single_url = b""
+    name_folder = create_folder_to_save(path)
+    for single_url in url_list:
+        host_sub_url, path_sub_url = getHOSTandPATHfromURL(single_url.decode())
+        filename_sub = getFileName(host_sub_url, path_sub_url)
+        filename_sub = name_folder + "//" + filename_sub
+        download_file(single_url.decode(), client_socket_folder, path_sub_url, host_sub_url, filename_sub)
+    # Xử lý data này
+# Hàm tạo folder dùng thư viện OS
+def create_folder_to_save(path):
+    name_folder = ""
+    buffer = path.split('/')
+    index = len(buffer) - 2
+    name_folder = buffer[index]
+    os.mkdir(name_folder)
+    return name_folder
+
+def download_file_through_url(URL):
+    host, path = getHOSTandPATHfromURL(URL)
+    client_socket = connectToServer(host, PORT)
+    client_socket = sendRequest(client_socket, path, host)
+    if isFolder(path) == True:
+        download_file_in_folder(URL, client_socket)
+    else:
+        filename = getFileName(host, path)
+        download_file(URL, client_socket, path, host, filename)
+    client_socket.close()
+# Hàm xử lý đa luồng dựa vào thư viện Threading
+def multiple_connection_server_download(list_url):
+    i = 0
+    while i < len(list_url):
+        thread = threading.Thread(target=download_file_through_url, args={list_url[i]})
+        thread.start()
+        i += 1
+
+#----------------------------------MAIN-------------------------------------
+# URL = input("Input URL you want to connect: ")
+url_list = list()
+input_url = ""
+while input_url != 'x':
+    input_url =  input("Input URL you want to download file: ")
+    url_list.append(input_url)
+multiple_connection_server_download(url_list)
+
+
